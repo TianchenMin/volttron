@@ -361,50 +361,51 @@ class SwitchHandler(HomeAssistantDomainHandler):
             raise UnsupportedPointError(point_name, self.entity_id)
 
 
-class CoverHandler(HomeAssistantDomainHandler):
+class CoverDomainHandler(HomeAssistantDomainHandler):
     """
-    Handler for `cover.*` entities (e.g. blinds, shades, garage doors).
-
-    Supported points:
-        - "state": value in {"open", "close", "stop", 0, 1, 2, "0", "1", "2"}
-            -> cover.open_cover / cover.close_cover / cover.stop_cover
-        - "position": value in [0, 100]
-            -> cover.set_cover_position
+    Domain handler for Home Assistant 'cover' entities.
     """
+    SUPPORTED_POINTS = {"state", "position"}
 
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
-        if point_name == "state":
-            # Map various input formats to cover service
-            if value in ("open", 0, "0"):
-                service = "open_cover"
-            elif value in ("close", 1, "1"):
-                service = "close_cover"
-            elif value in ("stop", 2, "2"):
-                service = "stop_cover"
-            else:
-                raise ValueError(
-                    f"Invalid state value for cover: {value!r}. "
-                    f"Expected 'open'/'close'/'stop', or 0/1/2"
-                )
-
-            payload = build_service_payload(self.entity_id)
-            return HomeAssistantServiceCall(domain="cover", service=service, payload=payload)
-
-        elif point_name == "position":
-            # Validate position range
-            position = int(value)
-            if not (0 <= position <= 100):
-                raise ValueError(f"Cover position must be between 0 and 100, got {position}")
-
-            payload = build_service_payload(self.entity_id, {"position": position})
-            return HomeAssistantServiceCall(
-                domain="cover",
-                service="set_cover_position",
-                payload=payload,
-            )
-
-        else:
+        # 1) Check supported point
+        if point_name not in self.SUPPORTED_POINTS:
             raise UnsupportedPointError(point_name, self.entity_id)
+
+        # Special case: "stop" command for state
+        if point_name == "state" and isinstance(value, str) and value.lower() == "stop":
+             payload = build_service_payload(self.entity_id)
+             return HomeAssistantServiceCall(domain="cover", service="stop_cover", payload=payload)
+
+        # 2) Normalize value using the shared utility
+        try:
+            normalized = _normalize_value(point_name, value)
+        except ValueError as e:
+            raise ValueError(f"Invalid value for {self.entity_id} ({point_name}): {e}")
+
+        # 3) Build specific service calls
+        if point_name == "state":
+            return self._build_state_call(normalized)
+        
+        if point_name == "position":
+            return self._build_position_call(normalized)
+
+        raise UnsupportedPointError(point_name, self.entity_id)
+
+    def _build_state_call(self, normalized_value: bool) -> HomeAssistantServiceCall:
+        service = "open_cover" if normalized_value else "close_cover"
+        payload = build_service_payload(self.entity_id)
+        return HomeAssistantServiceCall(domain="cover", service=service, payload=payload)
+
+    def _build_position_call(self, normalized_value: float) -> HomeAssistantServiceCall:
+        if not (0.0 <= normalized_value <= 100.0):
+             raise ValueError(
+                f"Cover position must be within [0, 100], got '{normalized_value}' for entity '{self.entity_id}'"
+            )
+        
+        payload = build_service_payload(self.entity_id, {"position": int(normalized_value)})
+        return HomeAssistantServiceCall(domain="cover", service="set_cover_position", payload=payload)
+
 
 
 # Domain -> handler class registry. Extend this mapping when adding new domains.
