@@ -141,6 +141,40 @@ def parse_entity_id(entity_id: str) -> Tuple[str, str]:
         raise ValueError(f"Invalid Home Assistant entity_id: {entity_id!r}")
     return parts[0], parts[1]
 
+def _normalize_value(point_name: str, value: Any) -> Any:
+    """
+    Normalize user-provided values into canonical types.
+
+    Rules:
+        - "state": normalize into True/False (on/off, true/false, 1/0, case-insensitive)
+        - "percentage" or "position": convert to int
+    """
+
+    if point_name == "state":
+        # Normalize string values case-insensitively
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("on", "true", "1"):
+                return True
+            if lowered in ("off", "false", "0"):
+                return False
+
+        # Direct booleans and ints
+        if value in (1, True):
+            return True
+        if value in (0, False):
+            return False
+
+        raise ValueError(f"Invalid value for point '{point_name}': {value!r}")
+
+    if point_name in ("percentage", "position"):
+        try:
+            return int(value)
+        except Exception:
+            raise ValueError(f"Invalid numeric value for point '{point_name}': {value!r}")
+
+    return value
+
 
 def ensure_supported_domain(entity_id: str, supported_domains: Iterable[str]) -> str:
     """
@@ -333,32 +367,34 @@ class FanHandler(HomeAssistantDomainHandler):
             raise UnsupportedPointError(point_name, self.entity_id)
 
 
-class SwitchHandler(HomeAssistantDomainHandler):
+class SwitchDomainHandler(HomeAssistantDomainHandler):
     """
     Handler for `switch.*` entities.
 
     Supported points:
         - "state": value in {0, 1, False, True, "on", "off", "0", "1"}
             -> switch.turn_on / switch.turn_off
+
+    Note:
+        - HTTP requests are NOT performed here.
+        - Value normalization is handled via `_normalize_value`.
     """
 
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
-        if point_name == "state":
-            if value in (1, True, "on", "1"):
-                service = "turn_on"
-            elif value in (0, False, "off", "0"):
-                service = "turn_off"
-            else:
-                raise ValueError(
-                    f"Invalid state value for switch: {value!r}. "
-                    f"Expected 0/1, True/False, or 'on'/'off'"
-                )
-
-            payload = build_service_payload(self.entity_id)
-            return HomeAssistantServiceCall(domain="switch", service=service, payload=payload)
-
-        else:
+        if point_name != "state":
             raise UnsupportedPointError(point_name, self.entity_id)
+
+        # Use shared normalization function (mandatory team rule)
+        normalized = _normalize_value("state", value)
+
+        service = "turn_on" if normalized else "turn_off"
+        payload = build_service_payload(self.entity_id)
+
+        return HomeAssistantServiceCall(
+            domain="switch",
+            service=service,
+            payload=payload,
+        )
 
 
 class CoverHandler(HomeAssistantDomainHandler):
@@ -410,7 +446,7 @@ class CoverHandler(HomeAssistantDomainHandler):
 # Domain -> handler class registry. Extend this mapping when adding new domains.
 HANDLER_REGISTRY: Dict[str, Type[HomeAssistantDomainHandler]] = {
     "fan": FanHandler,
-    "switch": SwitchHandler,
+    "switch": SwitchDomainHandler,
     "cover": CoverHandler,
 }
 
