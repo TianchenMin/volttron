@@ -1,0 +1,12 @@
+{
+  "driver_config": {
+    "ip_address": "localhost",
+    "access_token": "dummy-token",
+    "port": 8123
+  },
+  "driver_type": "home_assistant",
+  "registry_config": "config://home_assistant_fan.json",
+  "timezone": "US/Pacific",
+  "interval": 10
+}
+
