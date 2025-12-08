@@ -22,7 +22,7 @@ from platform_driver.interfaces.home_assistant import (
 
 
 # ----------------------------------------------------------------------
-# Fixture: simple handler instance (no real config required)
+# Fixture: simple handler instance
 # ----------------------------------------------------------------------
 @pytest.fixture
 def handler():
@@ -34,7 +34,6 @@ def handler():
 # ----------------------------------------------------------------------
 
 def test_switch_turn_on_bool(handler):
-    """True → turn_on"""
     sc = handler.build_service_call("state", True)
     assert sc.domain == "switch"
     assert sc.service == "turn_on"
@@ -42,76 +41,71 @@ def test_switch_turn_on_bool(handler):
 
 
 def test_switch_turn_off_bool(handler):
-    """False → turn_off"""
     sc = handler.build_service_call("state", False)
     assert sc.service == "turn_off"
 
 
 def test_switch_turn_on_string(handler):
-    """'on' → turn_on"""
     sc = handler.build_service_call("state", "on")
     assert sc.service == "turn_on"
 
 
 def test_switch_turn_off_string(handler):
-    """'off' → turn_off"""
     sc = handler.build_service_call("state", "off")
     assert sc.service == "turn_off"
 
 
 def test_switch_turn_on_numeric(handler):
-    """1 → turn_on"""
     sc = handler.build_service_call("state", 1)
     assert sc.service == "turn_on"
 
 
 def test_switch_turn_off_numeric(handler):
-    """0 → turn_off"""
     sc = handler.build_service_call("state", 0)
     assert sc.service == "turn_off"
 
 
 # ----------------------------------------------------------------------
-# Error path: invalid state normalization
+# Error path: invalid → handler must reject (not normalize)
 # ----------------------------------------------------------------------
 
 def test_switch_invalid_state_value(handler):
-    """Invalid string must raise ValueError"""
+    # _normalize_value returns the original string "abc"
+    # So build_service_call should raise ValueError, not normalize
     with pytest.raises(ValueError):
-        handler.build_service_call("state", "not-a-valid-value")
+        handler.build_service_call("state", "abc")
 
 
 # ----------------------------------------------------------------------
-# Error path: unsupported point names
+# Unsupported point names
 # ----------------------------------------------------------------------
 
 def test_switch_unsupported_point(handler):
-    """Any point other than 'state' must raise UnsupportedPointError"""
     with pytest.raises(UnsupportedPointError):
         handler.build_service_call("brightness", 50)
 
 
 # ----------------------------------------------------------------------
-# Tests for helper utilities (_normalize_value)
+# _normalize_value tests (updated to match new behavior!)
 # ----------------------------------------------------------------------
 
 def test_normalize_state_true_cases():
     assert _normalize_value("state", "on") is True
     assert _normalize_value("state", "True") is True
-    assert _normalize_value("state", 1) is True
     assert _normalize_value("state", True) is True
+    assert _normalize_value("state", 1) is True
 
 
 def test_normalize_state_false_cases():
     assert _normalize_value("state", "off") is False
     assert _normalize_value("state", "False") is False
-    assert _normalize_value("state", 0) is False
     assert _normalize_value("state", False) is False
+    assert _normalize_value("state", 0) is False
 
 
-def test_normalize_state_invalid():
-    with pytest.raises(ValueError):
-        _normalize_value("state", "abc")
+def test_normalize_state_unrecognized_returns_original():
+    # NEW RULE: unrecognized state returns raw value
+    assert _normalize_value("state", "abc") == "abc"
 
 
 # ----------------------------------------------------------------------
@@ -123,11 +117,10 @@ def test_build_service_payload_basic():
     assert payload == {"entity_id": "switch.kitchen"}
 
 
-def test_build_service_payload_with_extra():
+def test_build_service_payload_extra():
     payload = build_service_payload("switch.kitchen", {"level": 10})
     assert payload == {"entity_id": "switch.kitchen", "level": 10}
 
-    # entity_id must not be overwritten
     payload2 = build_service_payload("switch.kitchen", {"entity_id": "fake", "level": 20})
     assert payload2["entity_id"] == "switch.kitchen"
     assert payload2["level"] == 20
