@@ -352,3 +352,85 @@ Potential future improvements:
 
 This README is meant as a living document. Please update it as you add new
 domains, handlers, or behaviors to the Home Assistant driver.
+
+## 8. SwitchDomainHandler Enhancements
+
+### 8.1 Supported Logical Point: `state`
+
+The enhanced `SwitchDomainHandler` provides a unified and predictable mapping for the `state` logical point across all `switch.*` Home Assistant entities.
+
+The handler accepts multiple representations of on/off values:
+
+- **On:** `1`, `"1"`, `True`, `"true"`, `"on"`
+- **Off:** `0`, `"0"`, `False`, `"false"`, `"off"`
+
+Any value that does not clearly represent an on/off state results in a `ValueError`.  
+Requests for unsupported points raise `UnsupportedPointError`.
+
+This ensures that all write operations behave consistently and fail early when incorrect inputs are provided.
+
+### 8.2 Design Principles
+
+The updated handler follows three key design principles:
+
+1. **Purity** — All domain handlers remain free of networking logic, returning only structured `HomeAssistantServiceCall` objects.
+2. **Strict validation** — Input normalization occurs before service call generation to prevent invalid HTTP requests.
+3. **Consistency** — Behavior is standardized across all switch entities, reducing ambiguity and simplifying debugging.
+
+These refinements help unify the driver architecture and reduce reliance on older legacy write paths.
+
+---
+
+## 9. Unified Input Normalization System
+
+### 9.1 State Normalization Rules
+
+To avoid duplicated logic across multiple handlers, a consolidated normalization layer interprets all boolean-like inputs.  
+Normalization converts various incoming values into canonical boolean states:
+
+- Values interpreted as **True**: `"on"`, `"true"`, `"1"`, `1`, `True`
+- Values interpreted as **False**: `"off"`, `"false"`, `"0"`, `0`, `False`
+
+Invalid strings such as `"maybe"`, `"abc"`, or numbers outside `{0,1}` fail with a `ValueError`.
+
+### 9.2 Numeric Normalization
+
+If the registry defines the point type as integer, numeric strings such as `"0"` and `"1"` are automatically converted into integers, maintaining compatibility with Volttron’s `reg_type` casting.
+
+### 9.3 Benefits of Consolidated Normalization
+
+- Prevents inconsistencies between domains.
+- Simplifies future maintenance.
+- Ensures reproducible behavior for every write request.
+- Reduces debugging time by failing fast on malformed inputs.
+
+---
+
+## 10. Switch Handler Unit Tests
+
+### 10.1 Test Coverage Summary
+
+The unit test suite for the switch domain validates:
+
+- Normalization of all acceptable inputs (`on`/`off` across string, numeric, and boolean types).
+- Incorrect values correctly raising `ValueError`.
+- Unsupported point names raising `UnsupportedPointError`.
+- Correct formation of `HomeAssistantServiceCall` objects:
+  - domain = `"switch"`
+  - service = `"turn_on"` or `"turn_off"`
+  - payload contains correct `entity_id`
+
+### 10.2 Test Location
+
+Tests are stored under:
+  \`\`\`text
+  ~/volttron/services/core/PlatformDriverAgent/unit_tests/test_switch_unit.py
+  \`\`\`
+This keeps the suite isolated from Volttron runtime dependencies and ensures rapid execution.
+
+### 10.3 How to Run the Tests
+
+From within the `unit_tests` directory:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q --rootdir=. --confcutdir=. test_switch_unit.py
