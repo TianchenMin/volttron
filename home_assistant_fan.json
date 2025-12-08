@@ -1,0 +1,13 @@
+[
+  {
+    "Entity ID": "fan.test_fan",
+    "Entity Point": "state",
+    "Volttron Point Name": "fan_state",
+    "Units": "On/Off",
+    "Writable": true,
+    "Starting Value": 0,
+    "Type": "int",
+    "Notes": "fan for smoke test"
+  }
+]
+
