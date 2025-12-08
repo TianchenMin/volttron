@@ -6,14 +6,15 @@ from platform_driver.interfaces.home_assistant import (
     get_domain_from_entity_id,
     build_service_payload,
     _normalize_value,
-    FanHandler,
-    SwitchHandler,
-    CoverHandler,
+    FanDomainHandler as FanHandler,
+    SwitchDomainHandler as SwitchHandler,
+    CoverDomainHandler as CoverHandler,
     LightHandler,
     ThermostatHandler,
     HomeAssistantServiceCall,
     UnsupportedPointError,
 )
+
 
 
 # =====================================================================
