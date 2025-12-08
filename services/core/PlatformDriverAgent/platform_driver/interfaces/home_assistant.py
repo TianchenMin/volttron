@@ -544,7 +544,7 @@ class CoverDomainHandler(HomeAssistantDomainHandler):
                         f"Cover position must be between 0 and 100, got {position}"
                     )
             
-            except ValueError as e:
+            except (ValueError, TypeError) as e:
                 # Catch all ValueErrors (from _normalize_value for non-numeric input, or from range check)
                 raise ValueError(f"Cover position processing failed for {value!r}: {e}") from e
 
