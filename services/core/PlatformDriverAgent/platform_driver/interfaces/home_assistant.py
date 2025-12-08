@@ -134,12 +134,108 @@ def parse_entity_id(entity_id: str) -> Tuple[str, str]:
         "fan.living_room_fan" -> ("fan", "living_room_fan")
 
     Raises:
-        ValueError: if the entity_id does not contain a '.' separator.
+        ValueError: if the entity_id does not contain a '.' separator or has
+        an empty domain/object_id part.
     """
+    if not isinstance(entity_id, str):
+        raise ValueError("entity_id must be a non-empty string")
+
+    entity_id = entity_id.strip()
+    if not entity_id:
+        raise ValueError("entity_id must be a non-empty string")
+
     parts = entity_id.split(".", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise ValueError(f"Invalid Home Assistant entity_id: {entity_id!r}")
     return parts[0], parts[1]
+
+
+def get_domain_from_entity_id(entity_id: str) -> str:
+    """
+    Extract the Home Assistant domain from an entity_id.
+
+    Example:
+        "light.living_room" -> "light"
+
+    This is the preferred helper for code that only needs the domain.
+    """
+    domain, _ = parse_entity_id(entity_id)
+    return domain
+
+
+NUMERIC_POINTS = {
+    "temperature",
+    "heat_setpoint",
+    "cool_setpoint",
+    "position",
+    "percentage",
+    "brightness",
+    "speed",
+}
+
+
+def _normalize_value(point_name: str, value: Any) -> Any:
+    """
+    Normalize user-provided values into types acceptable by Home Assistant.
+
+    Rules (shared by all handlers):
+
+    - point_name == "state":
+        - Bool: kept as is.
+        - Strings (case-insensitive):
+            "on", "true", "open"              -> True
+            "off", "false", "closed", "close" -> False
+        - Numbers:
+            1 -> True
+            0 -> False
+        - Other values (e.g. "stop") are returned as-is.
+
+    - Numeric points (e.g. temperature, position, percentage, brightness, speed):
+        - int/float: kept as is.
+        - numeric strings: converted to int or float.
+
+    - Other cases:
+        - return the value unchanged.
+    """
+    # 1) Normalize boolean-like "state"
+    if point_name == "state":
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("on", "true", "open"):
+                return True
+            if lowered in ("off", "false", "closed", "close"):
+                return False
+
+        if isinstance(value, (int, float)):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+
+        return value
+
+    # 2) Numeric points
+    if point_name in NUMERIC_POINTS:
+        if isinstance(value, (int, float)):
+            return value
+
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                try:
+                    if "." in stripped:
+                        return float(stripped)
+                    return int(stripped)
+                except ValueError:
+                    return value
+
+        return value
+
+    # 3) Default: return as is
+    return value
 
 
 def ensure_supported_domain(entity_id: str, supported_domains: Iterable[str]) -> str:
@@ -156,7 +252,7 @@ def ensure_supported_domain(entity_id: str, supported_domains: Iterable[str]) ->
     Raises:
         UnsupportedDomainError: if the domain is not in supported_domains.
     """
-    domain, _ = parse_entity_id(entity_id)
+    domain = get_domain_from_entity_id(entity_id)
     if domain not in supported_domains:
         raise UnsupportedDomainError(entity_id)
     return domain
@@ -205,7 +301,7 @@ def build_service_payload(
 
 
 # =====================================================================
-# Base handler for domains (fan / switch / cover / ...)
+# Base handler for domains (fan / switch / cover / light / climate / ...)
 # =====================================================================
 
 
@@ -263,7 +359,7 @@ class HomeAssistantDomainHandler(ABC):
         Args:
             point_name:
                 Logical "point" name as used by the Volttron driver
-                (e.g., "on", "off", "level").
+                (e.g., "state", "brightness", "temperature").
             value:
                 Value to write for this point. Different handlers may accept
                 different value types (bool, int, str, enums, etc.).
@@ -287,7 +383,7 @@ class HomeAssistantDomainHandler(ABC):
 
 
 # =====================================================================
-# Domain handler implementations
+# Domain handler implementations (fan / switch / cover)
 # =====================================================================
 
 
@@ -301,7 +397,10 @@ class FanHandler(HomeAssistantDomainHandler):
         - "percentage": value in [0, 100]
             -> fan.set_percentage
 
-    Do NOT perform HTTP inside this class; just return HomeAssistantServiceCall.
+    NOTE:
+        This handler currently uses its own simple value checks. The shared
+        `_normalize_value` helper can be wired in later if desired, but is
+        kept unchanged here to avoid touching teammates' logic.
     """
 
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
@@ -407,11 +506,146 @@ class CoverHandler(HomeAssistantDomainHandler):
             raise UnsupportedPointError(point_name, self.entity_id)
 
 
+# =====================================================================
+# Domain handler implementations for legacy devices (light / climate)
+# =====================================================================
+
+
+class LightHandler(HomeAssistantDomainHandler):
+    """
+    Handler for `light.*` entities.
+
+    Supported points:
+        - "state": on/off
+            Accepted values: 0/1, True/False, "on"/"off"/"true"/"false"/"open"/"closed"
+            -> light.turn_on / light.turn_off
+        - "brightness": integer 0–255
+            -> light.turn_on with "brightness" field
+    """
+
+    def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
+        if point_name == "state":
+            normalized = _normalize_value("state", value)
+
+            if isinstance(normalized, bool):
+                service = "turn_on" if normalized else "turn_off"
+                payload = build_service_payload(self.entity_id)
+                return HomeAssistantServiceCall(
+                    domain="light",
+                    service=service,
+                    payload=payload,
+                )
+
+            raise ValueError(
+                f"Invalid state value for light: {value!r}. "
+                "Expected a boolean-like value such as 0/1, True/False, 'on'/'off'."
+            )
+
+        if point_name == "brightness":
+            normalized = _normalize_value("brightness", value)
+            try:
+                brightness = int(normalized)
+            except (TypeError, ValueError):
+                raise ValueError(f"Brightness for light must be a number, got {value!r}")
+
+            if not (0 <= brightness <= 255):
+                raise ValueError(f"Brightness value should be between 0 and 255, got {brightness}")
+
+            payload = build_service_payload(self.entity_id, {"brightness": brightness})
+            # Home Assistant uses light.turn_on to set brightness
+            return HomeAssistantServiceCall(
+                domain="light",
+                service="turn_on",
+                payload=payload,
+            )
+
+        raise UnsupportedPointError(point_name, self.entity_id)
+
+
+class ThermostatHandler(HomeAssistantDomainHandler):
+    """
+    Handler for `climate.*` thermostat entities.
+
+    Supported points:
+        - "state": integer mode code or mode string
+            0 -> "off"
+            2 -> "heat"
+            3 -> "cool"
+            4 -> "auto"
+        - "temperature": numeric setpoint.
+
+    NOTE:
+        For compatibility with the legacy implementation:
+        - If config["units"] == "C", we assume the input value is in Fahrenheit
+          and convert it to Celsius before sending to Home Assistant.
+    """
+
+    MODE_CODE_TO_NAME = {
+        0: "off",
+        2: "heat",
+        3: "cool",
+        4: "auto",
+    }
+
+    def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
+        if point_name == "state":
+            mode_name: Optional[str] = None
+
+            # Integer codes
+            if isinstance(value, (int, float)):
+                mode_name = self.MODE_CODE_TO_NAME.get(int(value))
+
+            # Direct mode strings
+            if mode_name is None and isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in ("off", "heat", "cool", "auto"):
+                    mode_name = lowered
+
+            if mode_name is None:
+                raise ValueError(
+                    f"Invalid climate state value: {value!r}. "
+                    "Expected 0/2/3/4 or 'off'/'heat'/'cool'/'auto'."
+                )
+
+            payload = build_service_payload(self.entity_id, {"hvac_mode": mode_name})
+            return HomeAssistantServiceCall(
+                domain="climate",
+                service="set_hvac_mode",
+                payload=payload,
+            )
+
+        if point_name == "temperature":
+            normalized = _normalize_value("temperature", value)
+            try:
+                temperature = float(normalized)
+            except (TypeError, ValueError):
+                raise ValueError(f"Climate temperature must be numeric, got {value!r}")
+
+            units = self.config.get("units")
+            if units == "C":
+                # Keep behavior parity with legacy set_thermostat_temperature:
+                # treat the input as Fahrenheit and convert to Celsius.
+                converted = round((temperature - 32.0) * 5.0 / 9.0, 1)
+            else:
+                converted = temperature
+
+            payload = build_service_payload(self.entity_id, {"temperature": converted})
+            return HomeAssistantServiceCall(
+                domain="climate",
+                service="set_temperature",
+                payload=payload,
+            )
+
+        raise UnsupportedPointError(point_name, self.entity_id)
+
+
 # Domain -> handler class registry. Extend this mapping when adding new domains.
 HANDLER_REGISTRY: Dict[str, Type[HomeAssistantDomainHandler]] = {
     "fan": FanHandler,
     "switch": SwitchHandler,
     "cover": CoverHandler,
+    "light": LightHandler,
+    "climate": ThermostatHandler,
 }
 
 
@@ -564,7 +798,11 @@ class Interface(BasicRevert, BaseInterface):
         if handler is not None:
             return handler
 
-        domain, _ = parse_entity_id(entity_id)
+        try:
+            domain = get_domain_from_entity_id(entity_id)
+        except ValueError:
+            raise UnsupportedDomainError(entity_id, "Invalid entity_id format")
+
         handler_cls = HANDLER_REGISTRY.get(domain)
         if handler_cls is None:
             # No handler registered for this domain
@@ -602,8 +840,8 @@ class Interface(BasicRevert, BaseInterface):
             - Lookup register by Volttron point name.
             - Enforce read_only flag.
             - Cast to the register's declared type.
-            - If the entity's domain has a handler (fan/switch/cover), route
-              through the new handler-based path.
+            - If the entity's domain has a handler (fan/switch/cover/light/climate),
+              route through the new handler-based path.
             - Otherwise, fall back to the legacy light / input_boolean /
               climate logic.
             - Cache the written value in the register.
@@ -618,16 +856,16 @@ class Interface(BasicRevert, BaseInterface):
         entity_id = register.entity_id
         entity_point = register.entity_point
 
-        # Try new handler-based path first (fan / switch / cover, etc.)
+        # Try new handler-based path first (fan / switch / cover / light / climate, etc.)
         try:
-            domain, _ = parse_entity_id(entity_id)
+            domain = get_domain_from_entity_id(entity_id)
         except ValueError:
             domain = ""
 
         if domain in HANDLER_REGISTRY:
             handler = self._get_handler_for_register(register)
             # IMPORTANT:
-            #   这里传入 handler 的是 registry 里的 Entity Point（"state"/"percentage"/"position"），
+            #   这里传入 handler 的是 registry 里的 Entity Point（"state"/"percentage"/"position"...），
             #   而不是 Volttron Point Name。
             service_call = handler.build_service_call(entity_point, register.value)
             op_desc = f"{service_call.domain}.{service_call.service} for {entity_id}"
@@ -828,7 +1066,7 @@ class Interface(BasicRevert, BaseInterface):
 
         NOTE:
             这里保留了原来的解析逻辑，只在每个 register 创建之后，
-            根据 entity_id 的 domain 尝试注册对应的 handler（fan/switch/cover）。
+            根据 entity_id 的 domain 尝试注册对应的 handler（fan/switch/cover/light/climate）。
         """
         if config_dict is None:
             return
@@ -866,9 +1104,9 @@ class Interface(BasicRevert, BaseInterface):
 
             self.insert_register(register)
 
-            # 尝试为该 entity 注册 domain handler（如果是我们支持的 fan/switch/cover）
+            # 尝试为该 entity 注册 domain handler（如果是我们支持的 fan/switch/cover/light/climate）
             try:
-                domain, _ = parse_entity_id(entity_id)
+                domain = get_domain_from_entity_id(entity_id)
             except ValueError:
                 _log.warning("Skipping handler registration, invalid entity_id: %r", entity_id)
                 continue
