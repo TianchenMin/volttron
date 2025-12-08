@@ -4,7 +4,8 @@ Home Assistant Driver
 =====================
 
 The Home Assistant driver enables VOLTTRON to read any data point from any Home Assistant controlled device.
-Currently control(write access) is supported only for lights(state and brightness) and thermostats(state and temperature).
+Control (write access) is supported for lights (state and brightness), thermostats (state and temperature),
+and additional domains such as fans (state, percentage), covers (state, position), and switches (state).
 
 The following diagram shows interaction between platform driver agent and home assistant driver.
 
@@ -28,19 +29,21 @@ Clone the repository, start volttron, install the listener agent, and the platfo
 
 - `Listener agent <https://volttron.readthedocs.io/en/main/introduction/platform-install.html#installing-and-running-agents>`_
 - `Platform driver agent <https://volttron.readthedocs.io/en/main/agent-framework/core-service-agents/platform-driver/platform-driver-agent.html?highlight=platform%20driver%20isntall#configuring-the-platform-driver>`_
+
 Configuration
 --------------
 
 After cloning, generate configuration files. Each device requires one device configuration file and one registry file.
-Ensure your registry_config parameter in your device configuration file, links to correct registry config name in the
-config store. For more details on how volttron platform driver agent works with volttron configuration store see,
-`Platform driver configuration <https://volttron.readthedocs.io/en/main/agent-framework/driver-framework/platform-driver/platform-driver.html#configuration-and-installation>`_
+Ensure your registry_config parameter in your device configuration file links to the correct registry config name in the
+config store. For more details on how the VOLTTRON platform driver agent works with the VOLTTRON configuration store see
+`Platform driver configuration <https://volttron.readthedocs.io/en/main/agent-framework/driver-framework/platform-driver/platform-driver.html#configuration-and-installation>`_.
 Examples for lights, thermostats, covers, fans, and switches are provided below.
 
 Device configuration
 ++++++++++++++++++++
 
-Device configuration file contains the connection details to you home assistant instance and driver_type as "home_assistant"
+Device configuration file contains the connection details to your Home Assistant instance and ``driver_type`` as
+``"home_assistant"``:
 
 .. code-block:: json
 
@@ -60,27 +63,42 @@ Registry Configuration
 +++++++++++++++++++++++
 
 Registry file can contain one single device and its attributes or a logical group of devices and its
-attributes. Each entry should include the full entity id of the device, including but not limited to home assistant provided prefix
-such as "light.",  "climate.", "cover.", "fan.", or "switch.". The driver uses these prefixes to determine the appropriate handler for the device.
+attributes. Each entry should include the full entity id of the device, including but not limited to Home Assistant
+provided prefix such as ``"light."``, ``"climate."``, ``"cover."``, ``"fan."``, or ``"switch."``. The driver uses
+these prefixes (domains) to determine the appropriate handler for the device.
 
 The driver supports **write access** (control) and **read access** for the following domains:
 
 * **Light**: State (on/off) and Brightness.
 * **Climate**: State (mode) and Temperature setpoint.
-* **Cover**: State (open/close/stop) and Position (0-100).
-* **Fan**: State (on/off) and Percentage (speed 0-100).
+* **Cover**: State (open/close/stop) and Position (0–100).
+* **Fan**: State (on/off) and Percentage (speed 0–100).
 * **Switch**: State (on/off).
 
-Each entry in a registry file should also have a 'Entity Point' and a unique value for 'Volttron Point Name'. The 'Entity ID' maps to the device instance, the 'Entity Point' extracts the attribute or state, and 'Volttron Point Name' determines the name of that point as it appears in VOLTTRON.
+.. note::
+
+    **Value normalization**
+
+    The driver normalizes values before sending them to Home Assistant:
+
+    * For ``state`` points, you can use booleans, integers ``0``/``1``, or common strings such as
+      ``"on"``, ``"off"``, ``"true"``, ``"false"``, ``"open"``, ``"close"``. For covers, the special
+      value ``"stop"`` (or numeric code ``2``) maps to the ``stop_cover`` service.
+    * For numeric points (for example ``temperature``, ``percentage``, ``position``, ``brightness``
+      and ``speed``), the driver accepts integers, floats, or numeric strings. Values are validated and
+      must fall within the expected domain-specific ranges (for example ``0–100`` for cover position
+      or fan percentage, ``0–255`` for light brightness).
+
+Each entry in a registry file should also have an ``Entity Point`` and a unique value for ``Volttron Point Name``.
+The ``Entity ID`` maps to the device instance, the ``Entity Point`` selects the attribute or state on that device,
+and ``Volttron Point Name`` determines the name of that point as it appears in VOLTTRON.
 
 Attributes can be located in the developer tools in the Home Assistant GUI.
 
 .. image:: home-assistant.png
 
-
-Below is an example file named light.example.json which has attributes of a single light instance with entity
-id 'light.example':
-
+Below is an example file named ``light.example.json`` which has attributes of a single light instance with entity
+id ``"light.example"``:
 
 .. code-block:: json
 
@@ -109,21 +127,21 @@ id 'light.example':
        }
    ]
 
-
 .. note::
 
     When using a single registry file to represent a logical group of multiple physical entities, make sure the
-    "Volttron Point Name" is unique within a single registry file.
+    ``Volttron Point Name`` is unique within a single registry file.
 
     For example, if a registry file contains entities with
-    id  'light.instance1' and 'light.instance2' the entry for the attribute brightness for these two light instances could
-    have "Volttron Point Name" as 'light1/brightness' and 'light2/brightness' respectively. This would ensure that data
-    is posted to unique topic names and brightness data from light1 is not overwritten by light2 or vice-versa.
+    id  ``"light.instance1"`` and ``"light.instance2"`` the entry for the attribute brightness for these two light
+    instances could have ``Volttron Point Name`` as ``"light1/brightness"`` and ``"light2/brightness"`` respectively.
+    This would ensure that data is posted to unique topic names and brightness data from light1 is not overwritten by
+    light2 or vice-versa.
 
 Example Thermostat Registry
 ***************************
 
-For thermostats, the state is converted into numbers as follows: "0: Off, 2: heat, 3: Cool, 4: Auto",
+For thermostats, the state is converted into numbers as follows: ``0: Off, 2: Heat, 3: Cool, 4: Auto``.
 
 .. code-block:: json
 
@@ -133,7 +151,7 @@ For thermostats, the state is converted into numbers as follows: "0: Off, 2: hea
            "Entity Point": "state",
            "Volttron Point Name": "thermostat_state",
            "Units": "Enumeration",
-           "Units Details": "0: Off, 2: heat, 3: Cool, 4: Auto",
+           "Units Details": "0: Off, 2: Heat, 3: Cool, 4: Auto",
            "Writable": true,
            "Starting Value": 1,
            "Type": "int",
@@ -145,7 +163,7 @@ For thermostats, the state is converted into numbers as follows: "0: Off, 2: hea
            "Volttron Point Name": "volttron_current_temperature",
            "Units": "F",
            "Units Details": "Current Ambient Temperature",
-           "Writable": true,
+           "Writable": false,
            "Starting Value": 72,
            "Type": "float",
            "Notes": "Current temperature reading"
@@ -166,10 +184,14 @@ For thermostats, the state is converted into numbers as follows: "0: Off, 2: hea
 Expanded Device Support (Cover, Fan, Switch)
 ********************************************
 
-The driver now supports additional device types. Below is a combined configuration example showing how to configure a **Cover** (e.g., Garage Door or Blind), a **Fan**, and a **Switch**.
+The driver now supports additional device types. Below is a combined configuration example showing how to configure a
+**Cover** (e.g., Garage Door or Blind), a **Fan**, and a **Switch**.
 
 **Note on Values:**
-* For ``state`` points (Cover, Fan, Switch): You can write boolean ``true``/``false``, integers ``1``/``0``, or strings ``"on"``/``"off"`` (or ``"open"``/``"close"`` for covers).
+
+* For ``state`` points (Cover, Fan, Switch): You can write boolean ``true``/``false``, integers ``1``/``0``,
+  or strings ``"on"``/``"off"`` (or ``"open"``/``"close"`` for covers). For covers, ``"stop"`` or ``2``/``"2"`` maps
+  to ``stop_cover``.
 * For ``position`` or ``percentage`` points: Use integers between 0 and 100.
 
 .. code-block:: json
@@ -219,8 +241,7 @@ The driver now supports additional device types. Below is a combined configurati
         }
     ]
 
-
-Transfer the registers files and the config files into the VOLTTRON config store using the commands below:
+Transfer the registry files and the config files into the VOLTTRON config store using the commands below:
 
 .. code-block:: bash
 
@@ -238,14 +259,19 @@ Upon completion, initiate the platform driver. Utilize the listener agent to ver
 
 Running Tests
 +++++++++++++++++++++++
-To run integration tests on the VOLTTRON home assistant driver you need to create a helper in your home assistant instance. This can be done by going to **Settings > Devices & services > Helpers > Create Helper > Toggle**. Name this new toggle **volttrontest**. After that run the pytest from the root of your VOLTTRON file.
+
+To run integration tests on the VOLTTRON Home Assistant driver you need to create a helper in your Home Assistant
+instance. This can be done by going to **Settings > Devices & services > Helpers > Create Helper > Toggle**.
+Name this new toggle **volttrontest**. After that run ``pytest`` from the root of your VOLTTRON repository:
 
 .. code-block:: bash
 
+    # From the VOLTTRON repository root:
+
     # Run integration tests (requires live HA connection)
-    pytest volttron/services/core/PlatformDriverAgent/tests/test_home_assistant.py
+    pytest services/core/PlatformDriverAgent/tests/test_home_assistant.py
 
     # Run unit tests for handlers (offline)
-    pytest volttron/services/core/PlatformDriverAgent/tests/test_home_assistant_handlers.py
+    pytest services/core/PlatformDriverAgent/tests/test_home_assistant_handlers.py
 
 If everything works, you will see passed tests.
