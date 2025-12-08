@@ -28,7 +28,6 @@ Clone the repository, start volttron, install the listener agent, and the platfo
 
 - `Listener agent <https://volttron.readthedocs.io/en/main/introduction/platform-install.html#installing-and-running-agents>`_
 - `Platform driver agent <https://volttron.readthedocs.io/en/main/agent-framework/core-service-agents/platform-driver/platform-driver-agent.html?highlight=platform%20driver%20isntall#configuring-the-platform-driver>`_
-
 Configuration
 --------------
 
@@ -36,7 +35,7 @@ After cloning, generate configuration files. Each device requires one device con
 Ensure your registry_config parameter in your device configuration file, links to correct registry config name in the
 config store. For more details on how volttron platform driver agent works with volttron configuration store see,
 `Platform driver configuration <https://volttron.readthedocs.io/en/main/agent-framework/driver-framework/platform-driver/platform-driver.html#configuration-and-installation>`_
-Examples for lights and thermostats are provided below.
+Examples for lights, thermostats, covers, fans, and switches are provided below.
 
 Device configuration
 ++++++++++++++++++++
@@ -62,9 +61,15 @@ Registry Configuration
 
 Registry file can contain one single device and its attributes or a logical group of devices and its
 attributes. Each entry should include the full entity id of the device, including but not limited to home assistant provided prefix
-such as "light.",  "climate." etc. The driver uses these prefixes to convert states into integers.
-Like mentioned before, the driver can only control lights and thermostats but can get data from all devices
-controlled by home assistant
+such as "light.",  "climate.", "cover.", "fan.", or "switch.". The driver uses these prefixes to determine the appropriate handler for the device.
+
+The driver supports **write access** (control) and **read access** for the following domains:
+
+* **Light**: State (on/off) and Brightness.
+* **Climate**: State (mode) and Temperature setpoint.
+* **Cover**: State (open/close/stop) and Position (0-100).
+* **Fan**: State (on/off) and Percentage (speed 0-100).
+* **Switch**: State (on/off).
 
 Each entry in a registry file should also have a 'Entity Point' and a unique value for 'Volttron Point Name'. The 'Entity ID' maps to the device instance, the 'Entity Point' extracts the attribute or state, and 'Volttron Point Name' determines the name of that point as it appears in VOLTTRON.
 
@@ -107,13 +112,13 @@ id 'light.example':
 
 .. note::
 
-When using a single registry file to represent a logical group of multiple physical entities, make sure the
-"Volttron Point Name" is unique within a single registry file.
+    When using a single registry file to represent a logical group of multiple physical entities, make sure the
+    "Volttron Point Name" is unique within a single registry file.
 
-For example, if a registry file contains entities with
-id  'light.instance1' and 'light.instance2' the entry for the attribute brightness for these two light instances could
-have "Volttron Point Name" as 'light1/brightness' and 'light2/brightness' respectively. This would ensure that data
-is posted to unique topic names and brightness data from light1 is not overwritten by light2 or vice-versa.
+    For example, if a registry file contains entities with
+    id  'light.instance1' and 'light.instance2' the entry for the attribute brightness for these two light instances could
+    have "Volttron Point Name" as 'light1/brightness' and 'light2/brightness' respectively. This would ensure that data
+    is posted to unique topic names and brightness data from light1 is not overwritten by light2 or vice-versa.
 
 Example Thermostat Registry
 ***************************
@@ -158,6 +163,61 @@ For thermostats, the state is converted into numbers as follows: "0: Off, 2: hea
        }
    ]
 
+Expanded Device Support (Cover, Fan, Switch)
+********************************************
+
+The driver now supports additional device types. Below is a combined configuration example showing how to configure a **Cover** (e.g., Garage Door or Blind), a **Fan**, and a **Switch**.
+
+**Note on Values:**
+* For ``state`` points (Cover, Fan, Switch): You can write boolean ``true``/``false``, integers ``1``/``0``, or strings ``"on"``/``"off"`` (or ``"open"``/``"close"`` for covers).
+* For ``position`` or ``percentage`` points: Use integers between 0 and 100.
+
+.. code-block:: json
+
+    [
+        {
+            "Entity ID": "cover.garage_door",
+            "Entity Point": "state",
+            "Volttron Point Name": "garage_door_state",
+            "Writable": true,
+            "Type": "boolean",
+            "Notes": "True/Open/On = Open; False/Close/Off = Close"
+        },
+        {
+            "Entity ID": "cover.living_room_blind",
+            "Entity Point": "position",
+            "Volttron Point Name": "blind_position",
+            "Writable": true,
+            "Type": "int",
+            "Units": "%",
+            "Notes": "Sets blind position (0-100)"
+        },
+        {
+            "Entity ID": "fan.bedroom_fan",
+            "Entity Point": "state",
+            "Volttron Point Name": "bedroom_fan_state",
+            "Writable": true,
+            "Type": "boolean",
+            "Notes": "Fan on/off"
+        },
+        {
+            "Entity ID": "fan.bedroom_fan",
+            "Entity Point": "percentage",
+            "Volttron Point Name": "bedroom_fan_speed",
+            "Writable": true,
+            "Type": "int",
+            "Units": "%",
+            "Notes": "Fan speed (0-100)"
+        },
+        {
+            "Entity ID": "switch.kitchen_plug",
+            "Entity Point": "state",
+            "Volttron Point Name": "kitchen_plug_state",
+            "Writable": true,
+            "Type": "boolean",
+            "Notes": "Smart plug switch"
+        }
+    ]
 
 
 Transfer the registers files and the config files into the VOLTTRON config store using the commands below:
@@ -178,9 +238,14 @@ Upon completion, initiate the platform driver. Utilize the listener agent to ver
 
 Running Tests
 +++++++++++++++++++++++
-To run tests on the VOLTTRON home assistant driver you need to create a helper in your home assistant instance. This can be done by going to **Settings > Devices & services > Helpers > Create Helper > Toggle**. Name this new toggle **volttrontest**. After that run the pytest from the root of your VOLTTRON file.
+To run integration tests on the VOLTTRON home assistant driver you need to create a helper in your home assistant instance. This can be done by going to **Settings > Devices & services > Helpers > Create Helper > Toggle**. Name this new toggle **volttrontest**. After that run the pytest from the root of your VOLTTRON file.
 
 .. code-block:: bash
+
+    # Run integration tests (requires live HA connection)
     pytest volttron/services/core/PlatformDriverAgent/tests/test_home_assistant.py
 
-If everything works, you will see 6 passed tests.
+    # Run unit tests for handlers (offline)
+    pytest volttron/services/core/PlatformDriverAgent/tests/test_home_assistant_handlers.py
+
+If everything works, you will see passed tests.

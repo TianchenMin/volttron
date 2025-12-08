@@ -476,85 +476,77 @@ class SwitchDomainHandler(HomeAssistantDomainHandler):
 class CoverDomainHandler(HomeAssistantDomainHandler):
     """
     Handler for `cover.*` entities (e.g. blinds, shades, garage doors).
-
+    
     Supported points:
         - "state":
-            * "stop" (any case) or numeric 2/"2" -> cover.stop_cover
-            * bool-like values mapped to open/close via _normalize_value("state"):
-                True  -> cover.open_cover
-                False -> cover.close_cover
-            * Explicit "open"/"close"/"closed" also supported.
-        - "position": numeric 0-100 -> cover.set_cover_position
+            * Explicit "stop" (string) or code 2/"2" → cover.stop_cover
+            * Boolean-like values (via _normalize_value) → open_cover / close_cover
+        - "position": numeric 0–100 → set_cover_position
     """
+    SUPPORTED_POINTS = {"state", "position"}
 
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
+        if point_name not in self.SUPPORTED_POINTS:
+            raise UnsupportedPointError(point_name, self.entity_id)
+
+        # -------------------- state --------------------
         if point_name == "state":
             raw = value
-
-            # 1) Explicit stop (string or code 2)
-            if isinstance(raw, str) and raw.strip().lower() == "stop":
-                payload = build_service_payload(self.entity_id)
-                return HomeAssistantServiceCall(
-                    domain="cover",
-                    service="stop_cover",
-                    payload=payload,
-                )
-
-            if raw in (2, "2"):
-                payload = build_service_payload(self.entity_id)
-                return HomeAssistantServiceCall(
-                    domain="cover",
-                    service="stop_cover",
-                    payload=payload,
-                )
-
-            # 2) Try boolean-like normalization
-            normalized = _normalize_value("state", raw)
-            if isinstance(normalized, bool):
-                service = "open_cover" if normalized else "close_cover"
-                payload = build_service_payload(self.entity_id)
-                return HomeAssistantServiceCall(
-                    domain="cover",
-                    service=service,
-                    payload=payload,
-                )
-
-            # 3) Fallback explicit open/close strings
-            if isinstance(raw, str):
-                lowered = raw.strip().lower()
-                if lowered == "open":
-                    payload = build_service_payload(self.entity_id)
-                    return HomeAssistantServiceCall(
-                        domain="cover",
-                        service="open_cover",
-                        payload=payload,
-                    )
-                if lowered in ("close", "closed"):
-                    payload = build_service_payload(self.entity_id)
-                    return HomeAssistantServiceCall(
-                        domain="cover",
-                        service="close_cover",
-                        payload=payload,
-                    )
-
-            raise ValueError(
-                f"Invalid state value for cover: {value!r}. "
-                "Expected boolean-like values, 'open'/'close'/'stop', or 0/1/2 codes."
+            service: Optional[str] = None
+            
+            # 1. Handle explicit 'stop' (string) or legacy code '2'
+            if (isinstance(raw, str) and raw.strip().lower() == "stop") or raw in (2, "2"):
+                service = "stop_cover"
+            
+            # 2. Use normalization for boolean-like open/close
+            else:
+                try:
+                    # _normalize_value handles core bool equivalents (on/off, 0/1)
+                    normalized = _normalize_value("state", raw)
+                    
+                    if normalized is True:
+                        service = "open_cover"
+                    elif normalized is False:
+                        service = "close_cover"
+                    # Note: Any non-bool successful return should ideally not happen based on _normalize_value's strict code
+                    
+                except ValueError as e:
+                    # Catch the ValueError thrown by _normalize_value when it encounters non-bool/non-stop input
+                    # We wrap and re-raise to ensure consistent error messaging.
+                    raise ValueError(
+                        f"Invalid state value for cover: {raw!r}. "
+                        "Expected boolean-like values (0/1, 'on'/'off'), 'stop'/'2'."
+                    ) from e
+            
+            # 3. Final service call construction
+            if service is None:
+                # Should be unreachable if the logic is exhaustive, but protects against edge cases.
+                raise ValueError(f"Unprocessed state value: {raw!r}")
+            
+            payload = build_service_payload(self.entity_id)
+            return HomeAssistantServiceCall(
+                domain="cover",
+                service=service,
+                payload=payload,
             )
 
+        # -------------------- position --------------------
         if point_name == "position":
-            normalized = _normalize_value("position", value)
+            # 1. Normalize and handle potential ValueError from _normalize_value
             try:
+                normalized = _normalize_value("position", value)
+                
+                # 2. Enforce final integer conversion and range check
                 position = int(normalized)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"Cover position must be numeric, got {value!r}"
-                )
 
-            if not (0 <= position <= 100):
-                raise ValueError(
-                    f"Cover position must be between 0 and 100, got {position}"
-                )
+                if not (0 <= position <= 100):
+                    raise ValueError(
+                        f"Cover position must be between 0 and 100, got {position}"
+                    )
+            
+            except ValueError as e:
+                # Catch all ValueErrors (from _normalize_value for non-numeric input, or from range check)
+                raise ValueError(f"Cover position processing failed for {value!r}: {e}") from e
 
             payload = build_service_payload(self.entity_id, {"position": position})
             return HomeAssistantServiceCall(
