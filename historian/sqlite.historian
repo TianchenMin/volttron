@@ -1,0 +1,9 @@
+{
+    "tables_definition": "volttron.platform.store.sqlite",
+    "connection": {
+        "type": "sqlite",
+        "db": "historian.sqlite"
+    },
+    "topic_replace_list": []
+}
+
