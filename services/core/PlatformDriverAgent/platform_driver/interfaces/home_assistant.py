@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- {{{
 # ===----------------------------------------------------------------------===
 #
 #                 Component of Eclipse VOLTTRON
@@ -13,12 +13,14 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software distributed
-# under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-# CONDITIONS OF ANY KIND, either express or implied. See the License for the
-# specific language governing permissions and limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
 #
 # ===----------------------------------------------------------------------===
+# }}}
 
 import json
 import logging
@@ -40,6 +42,7 @@ type_mapping = {
     "boolean": bool,
 }
 
+# Numeric-like points that we normalize via _normalize_value.
 NUMERIC_POINTS = {
     "temperature",
     "heat_setpoint",
@@ -54,7 +57,13 @@ NUMERIC_POINTS = {
 # Exceptions
 # =====================================================================
 
+
 class UnsupportedDomainError(ValueError):
+    """
+    Raised when a Home Assistant entity uses a domain that is not supported
+    by this driver (i.e., no handler is registered for that domain).
+    """
+
     def __init__(self, entity_id: str, message: Optional[str] = None) -> None:
         self.entity_id = entity_id
         if message is None:
@@ -63,6 +72,11 @@ class UnsupportedDomainError(ValueError):
 
 
 class UnsupportedPointError(KeyError):
+    """
+    Raised when a handler is asked to read/write a point that it does not
+    know how to map to a Home Assistant service or attribute.
+    """
+
     def __init__(self, point_name: str, entity_id: Optional[str] = None) -> None:
         self.point_name = point_name
         self.entity_id = entity_id
@@ -73,7 +87,23 @@ class UnsupportedPointError(KeyError):
 
 
 class ServiceCallError(RuntimeError):
-    def __init__(self, domain: str, service: str, payload: Mapping[str, Any], message: str) -> None:
+    """
+    Raised when a service call to Home Assistant fails at the transport
+    or protocol level (e.g., HTTP error status, connection failure, etc.).
+
+    NOTE:
+        This error is used by the generic service-calling path in this module.
+        Older helper methods may still raise a generic Exception; new code
+        should prefer raising ServiceCallError instead.
+    """
+
+    def __init__(
+        self,
+        domain: str,
+        service: str,
+        payload: Mapping[str, Any],
+        message: str,
+    ) -> None:
         self.domain = domain
         self.service = service
         self.payload = dict(payload)
@@ -81,21 +111,44 @@ class ServiceCallError(RuntimeError):
 
 
 # =====================================================================
-# Service call structure
+# Service call description
 # =====================================================================
+
 
 @dataclass(frozen=True)
 class HomeAssistantServiceCall:
+    """
+    Immutable description of a Home Assistant service call.
+
+    Instances of this class are produced by HomeAssistantDomainHandler.build_service_call
+    and consumed by higher-level driver code that actually performs HTTP requests
+    against the Home Assistant HTTP API.
+
+    IMPORTANT:
+        This object is *pure data* – creating it must not perform any network I/O.
+    """
+
     domain: str
     service: str
     payload: Dict[str, Any]
 
 
 # =====================================================================
-# Utilities
+# Utility functions (pure, no HTTP)
 # =====================================================================
 
+
 def parse_entity_id(entity_id: str) -> Tuple[str, str]:
+    """
+    Split a Home Assistant entity_id into (domain, object_id).
+
+    Example:
+        "fan.living_room_fan" -> ("fan", "living_room_fan")
+
+    Raises:
+        ValueError: if the entity_id does not contain a '.' separator or has
+        an empty domain/object_id part.
+    """
     if not isinstance(entity_id, str):
         raise ValueError("entity_id must be a non-empty string")
 
@@ -106,16 +159,49 @@ def parse_entity_id(entity_id: str) -> Tuple[str, str]:
     parts = entity_id.split(".", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise ValueError(f"Invalid Home Assistant entity_id: {entity_id!r}")
-
     return parts[0], parts[1]
 
 
 def get_domain_from_entity_id(entity_id: str) -> str:
+    """
+    Extract the Home Assistant domain from an entity_id.
+
+    Example:
+        "light.living_room" -> "light"
+
+    This is the preferred helper for code that only needs the domain.
+    """
     domain, _ = parse_entity_id(entity_id)
     return domain
 
 
 def _normalize_value(point_name: str, value: Any) -> Any:
+    """
+    Normalize user-provided values into types acceptable by Home Assistant.
+
+    Team-wide rules:
+
+    - point_name == "state":
+        - Bool: kept as is.
+        - Strings (case-insensitive):
+            "on", "true", "open", "yes", "1"       -> True
+            "off", "false", "closed", "close",
+            "no", "0"                              -> False
+        - Numbers:
+            1 -> True
+            0 -> False
+        - Other values (e.g. "stop") are returned as-is
+          (handlers may interpret them specially).
+
+    - Numeric points (e.g. temperature, position, percentage, brightness, speed):
+        - int/float: kept as is.
+        - numeric strings: converted to int or float.
+        - on parse failure: return the original value (no exception).
+
+    - Other cases:
+        - return the value unchanged.
+    """
+    # 1) Normalize boolean-like "state"
     if point_name == "state":
         if isinstance(value, bool):
             return value
@@ -133,8 +219,10 @@ def _normalize_value(point_name: str, value: Any) -> Any:
             if value == 0:
                 return False
 
+        # For things like "stop" or unknown markers, let handlers interpret
         return value
 
+    # 2) Numeric points
     if point_name in NUMERIC_POINTS:
         if isinstance(value, (int, float)):
             return value
@@ -143,59 +231,196 @@ def _normalize_value(point_name: str, value: Any) -> Any:
             stripped = value.strip()
             if stripped:
                 try:
-                    return float(stripped) if "." in stripped else int(stripped)
+                    if "." in stripped:
+                        return float(stripped)
+                    return int(stripped)
                 except ValueError:
                     return value
 
         return value
 
+    # 3) Default: return as is
     return value
 
 
-def build_service_payload(entity_id: str, extra: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    payload = {"entity_id": entity_id}
+def ensure_supported_domain(entity_id: str, supported_domains: Iterable[str]) -> str:
+    """
+    Validate that the entity_id's domain is within the given supported domains.
+
+    Args:
+        entity_id: Full Home Assistant entity_id, e.g. "fan.living_room_fan".
+        supported_domains: Iterable of supported domain strings.
+
+    Returns:
+        The domain component of the entity_id if it is supported.
+
+    Raises:
+        UnsupportedDomainError: if the domain is not in supported_domains.
+    """
+    domain = get_domain_from_entity_id(entity_id)
+    if domain not in supported_domains:
+        raise UnsupportedDomainError(entity_id)
+    return domain
+
+
+def build_service_url(base_url: str, domain: str, service: str) -> str:
+    """
+    Build the Home Assistant service API URL from the base_url, domain, and service.
+
+    This function does not perform any network I/O. It only concatenates
+    the proper API path.
+
+    Example:
+        base_url = "http://homeassistant.local:8123"
+        domain   = "fan"
+        service  = "turn_on"
+
+        -> "http://homeassistant.local:8123/api/services/fan/turn_on"
+    """
+    base = base_url.rstrip("/")
+    return f"{base}/api/services/{domain}/{service}"
+
+
+def build_service_payload(
+    entity_id: str,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Construct a payload dict for a Home Assistant service call.
+
+    The resulting payload always contains the `entity_id` key and merges any
+    additional fields from `extra`. Values in `extra` override other keys
+    if there is a collision (except `entity_id`, which is enforced).
+
+    Example:
+        build_service_payload("fan.living_room_fan", {"percentage": 75})
+        -> {"entity_id": "fan.living_room_fan", "percentage": 75}
+    """
+    payload: Dict[str, Any] = {"entity_id": entity_id}
     if extra:
-        for k, v in extra.items():
-            if k != "entity_id":
-                payload[k] = v
+        for key, value in extra.items():
+            if key == "entity_id":
+                continue
+            payload[key] = value
     return payload
 
 
 # =====================================================================
-# Base Domain Handler
+# Base handler for domains (fan / switch / cover / light / climate / ...)
 # =====================================================================
 
+
 class HomeAssistantDomainHandler(ABC):
+    """
+    Base class for per-domain Home Assistant handlers (fan, switch, cover, etc.).
+
+    Responsibilities:
+        - Hold common metadata such as `entity_id` and handler-specific config.
+        - Provide a stable abstract method `build_service_call(...)` that
+          subclasses implement to map logical "points" to Home Assistant
+          (domain, service, payload).
+
+    IMPORTANT:
+        Subclasses are ONLY responsible for deciding `(domain, service, payload)`
+        for a given `point_name` and `value`. They MUST NOT perform any HTTP
+        requests or other network I/O directly. The actual HTTP call will be
+        done by higher-level driver code using the returned HomeAssistantServiceCall.
+    """
+
     def __init__(self, entity_id: str, config: Mapping[str, Any]) -> None:
-        self._entity_id = entity_id
-        self._config = dict(config or {})
+        """
+        Initialize a domain handler.
+
+        Args:
+            entity_id:
+                Full Home Assistant entity_id, e.g. "fan.living_room_fan".
+            config:
+                Per-entity or per-handler configuration dictionary.
+                The base class stores a shallow copy so callers retain ownership.
+        """
+        self._entity_id: str = entity_id
+        self._config: Dict[str, Any] = dict(config or {})
 
     @property
     def entity_id(self) -> str:
+        """Return the full Home Assistant entity_id for this handler."""
         return self._entity_id
 
     @property
     def config(self) -> Mapping[str, Any]:
+        """
+        Read-only view of the handler configuration.
+
+        Subclasses may inspect configuration but should avoid mutating it
+        in-place. If mutation is required, they should work on a local copy.
+        """
         return self._config
 
     @abstractmethod
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
+        """
+        Build a HomeAssistantServiceCall for a given logical point.
+
+        Args:
+            point_name:
+                Logical "point" name as used by the Volttron driver
+                (e.g., "state", "brightness", "temperature").
+            value:
+                Value to write for this point. Different handlers may accept
+                different value types (bool, int, str, enums, etc.).
+
+        Returns:
+            A HomeAssistantServiceCall object containing:
+                - domain:  Home Assistant domain (e.g. "fan", "switch", "cover")
+                - service: Home Assistant service name within that domain
+                           (e.g. "turn_on", "turn_off", "set_percentage")
+                - payload: JSON-serializable dict to send in the HTTP body,
+                           which MUST include at least the `entity_id`.
+
+        Raises:
+            UnsupportedPointError:
+                If the given `point_name` is not supported by this handler.
+
+        IMPORTANT:
+            This method MUST NOT perform any HTTP or network I/O.
+        """
         raise NotImplementedError
 
 
 # =====================================================================
-# Fan Handler
+# Domain handler implementations (fan / switch / cover)
 # =====================================================================
 
+
 class FanDomainHandler(HomeAssistantDomainHandler):
+    """
+    Handler for `fan.*` entities.
+
+    Supported points:
+        - "state": bool-like value -> fan.turn_on / fan.turn_off
+        - "percentage" / "speed": numeric 0-100 -> fan.set_percentage
+
+    NOTE:
+        All input values are normalized via _normalize_value before use.
+    """
+
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
         if point_name == "state":
             normalized = _normalize_value("state", value)
-            if not isinstance(normalized, bool):
-                raise ValueError(f"Invalid state value for fan: {value!r}")
+            if isinstance(normalized, bool):
+                service = "turn_on" if normalized else "turn_off"
+            else:
+                raise ValueError(
+                    f"Invalid state value for fan: {value!r}. "
+                    "Expected a boolean-like value such as 0/1, True/False, 'on'/'off'."
+                )
 
-            service = "turn_on" if normalized else "turn_off"
-            return HomeAssistantServiceCall("fan", service, build_service_payload(self.entity_id))
+            payload = build_service_payload(self.entity_id)
+            return HomeAssistantServiceCall(
+                domain="fan",
+                service=service,
+                payload=payload,
+            )
 
         if point_name in ("percentage", "speed"):
             normalized = _normalize_value("percentage", value)
@@ -205,157 +430,167 @@ class FanDomainHandler(HomeAssistantDomainHandler):
                 raise ValueError(f"Fan percentage must be numeric, got {value!r}")
 
             if not (0 <= percentage <= 100):
-                raise ValueError(f"Fan percentage must be between 0 and 100, got {percentage}")
+                raise ValueError(
+                    f"Fan percentage must be between 0 and 100, got {percentage}"
+                )
 
+            payload = build_service_payload(self.entity_id, {"percentage": percentage})
             return HomeAssistantServiceCall(
-                "fan",
-                "set_percentage",
-                build_service_payload(self.entity_id, {"percentage": percentage}),
+                domain="fan",
+                service="set_percentage",
+                payload=payload,
             )
 
         raise UnsupportedPointError(point_name, self.entity_id)
 
 
-# =====================================================================
-# Switch Handler 
-# =====================================================================
-
 class SwitchDomainHandler(HomeAssistantDomainHandler):
+    """
+    Handler for `switch.*` entities.
+
+    Supported points:
+        - "state": bool-like value -> switch.turn_on / switch.turn_off
+    """
 
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
         if point_name != "state":
             raise UnsupportedPointError(point_name, self.entity_id)
 
         normalized = _normalize_value("state", value)
-        if not isinstance(normalized, bool):
+        if isinstance(normalized, bool):
+            service = "turn_on" if normalized else "turn_off"
+        else:
             raise ValueError(
                 f"Invalid state value for switch: {value!r}. "
                 "Expected a boolean-like value such as 0/1, True/False, 'on'/'off'."
             )
 
-        service = "turn_on" if normalized else "turn_off"
         payload = build_service_payload(self.entity_id)
+        return HomeAssistantServiceCall(
+            domain="switch",
+            service=service,
+            payload=payload,
+        )
 
-        return HomeAssistantServiceCall("switch", service, payload)
-
-# =====================================================================
-# Cover Handler
-# =====================================================================
 
 class CoverDomainHandler(HomeAssistantDomainHandler):
     """
-    Handler for cover.* entities.
-
-    Supported:
-        - state:
-            * "stop", 2 → stop_cover
-            * boolean-like → open_cover / close_cover
-            * "open"/"close"/"closed" as fallback
-        - position: 0–100
+    Handler for `cover.*` entities (e.g. blinds, shades, garage doors).
+    
+    Supported points:
+        - "state":
+            * Explicit "stop" (string) or code 2/"2" → cover.stop_cover
+            * Boolean-like values (via _normalize_value) → open_cover / close_cover
+        - "position": numeric 0–100 → set_cover_position
     """
+    SUPPORTED_POINTS = {"state", "position"}
 
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
-        # -----------------------
-        # STATE HANDLING
-        # -----------------------
+        if point_name not in self.SUPPORTED_POINTS:
+            raise UnsupportedPointError(point_name, self.entity_id)
+
+        # -------------------- state --------------------
         if point_name == "state":
             raw = value
-
-            # Explicit stop
-            if isinstance(raw, str) and raw.strip().lower() == "stop":
-                return HomeAssistantServiceCall(
-                    "cover",
-                    "stop_cover",
-                    build_service_payload(self.entity_id),
-                )
-
-            if raw in (2, "2"):
-                return HomeAssistantServiceCall(
-                    "cover",
-                    "stop_cover",
-                    build_service_payload(self.entity_id),
-                )
-
-            # Boolean-like values
-            normalized = _normalize_value("state", raw)
-            if isinstance(normalized, bool):
-                service = "open_cover" if normalized else "close_cover"
-                return HomeAssistantServiceCall(
-                    "cover",
-                    service,
-                    build_service_payload(self.entity_id),
-                )
-
-            # Fallback explicit strings
-            if isinstance(raw, str):
-                lowered = raw.strip().lower()
-                if lowered == "open":
-                    return HomeAssistantServiceCall(
-                        "cover",
-                        "open_cover",
-                        build_service_payload(self.entity_id),
-                    )
-                if lowered in ("close", "closed"):
-                    return HomeAssistantServiceCall(
-                        "cover",
-                        "close_cover",
-                        build_service_payload(self.entity_id),
-                    )
-
-            raise ValueError(
-                f"Invalid state value for cover: {value!r}. "
-                "Expected boolean-like values, 'open'/'close'/'stop', or 0/1/2 codes."
+            service: Optional[str] = None
+            
+            # 1. Handle explicit 'stop' (string) or legacy code '2'
+            if (isinstance(raw, str) and raw.strip().lower() == "stop") or raw in (2, "2"):
+                service = "stop_cover"
+            
+            # 2. Use normalization for boolean-like open/close
+            else:
+                try:
+                    # _normalize_value handles core bool equivalents (on/off, 0/1)
+                    normalized = _normalize_value("state", raw)
+                    
+                    if normalized is True:
+                        service = "open_cover"
+                    elif normalized is False:
+                        service = "close_cover"
+                    # Note: Any non-bool successful return should ideally not happen based on _normalize_value's strict code
+                    
+                except ValueError as e:
+                    # Catch the ValueError thrown by _normalize_value when it encounters non-bool/non-stop input
+                    # We wrap and re-raise to ensure consistent error messaging.
+                    raise ValueError(
+                        f"Invalid state value for cover: {raw!r}. "
+                        "Expected boolean-like values (0/1, 'on'/'off'), 'stop'/'2'."
+                    ) from e
+            
+            # 3. Final service call construction
+            if service is None:
+                # Should be unreachable if the logic is exhaustive, but protects against edge cases.
+                raise ValueError(f"Unprocessed state value: {raw!r}")
+            
+            payload = build_service_payload(self.entity_id)
+            return HomeAssistantServiceCall(
+                domain="cover",
+                service=service,
+                payload=payload,
             )
 
-        # -----------------------
-        # POSITION HANDLING
-        # -----------------------
+        # -------------------- position --------------------
         if point_name == "position":
-            normalized = _normalize_value("position", value)
+            # 1. Normalize and handle potential ValueError from _normalize_value
             try:
-                pos = int(normalized)
-            except (TypeError, ValueError):
-                raise ValueError(f"Cover position must be numeric, got {value!r}")
+                normalized = _normalize_value("position", value)
+                
+                # 2. Enforce final integer conversion and range check
+                position = int(normalized)
 
-            if not (0 <= pos <= 100):
-                raise ValueError(f"Cover position must be between 0 and 100, got {pos}")
+                if not (0 <= position <= 100):
+                    raise ValueError(
+                        f"Cover position must be between 0 and 100, got {position}"
+                    )
+            
+            except ValueError as e:
+                # Catch all ValueErrors (from _normalize_value for non-numeric input, or from range check)
+                raise ValueError(f"Cover position processing failed for {value!r}: {e}") from e
 
+            payload = build_service_payload(self.entity_id, {"position": position})
             return HomeAssistantServiceCall(
-                "cover",
-                "set_cover_position",
-                build_service_payload(self.entity_id, {"position": pos}),
+                domain="cover",
+                service="set_cover_position",
+                payload=payload,
             )
 
         raise UnsupportedPointError(point_name, self.entity_id)
 
 
 # =====================================================================
-# Light Handler (legacy but brought into registry)
+# Domain handler implementations for legacy devices (light / climate)
 # =====================================================================
+
 
 class LightHandler(HomeAssistantDomainHandler):
     """
-    Handler for light.* entities.
+    Handler for `light.*` entities.
 
-    Supported:
-        - state: boolean-like
-        - brightness: 0–255
+    Supported points:
+        - "state": on/off
+            Accepted values: 0/1, True/False, "on"/"off"/"true"/"false"/"open"/"closed"
+            -> light.turn_on / light.turn_off
+        - "brightness": integer 0–255
+            -> light.turn_on with "brightness" field
     """
 
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
         if point_name == "state":
             normalized = _normalize_value("state", value)
-            if not isinstance(normalized, bool):
-                raise ValueError(
-                    f"Invalid state value for light: {value!r}. "
-                    "Expected boolean-like 0/1, True/False, 'on'/'off'."
+
+            if isinstance(normalized, bool):
+                service = "turn_on" if normalized else "turn_off"
+                payload = build_service_payload(self.entity_id)
+                return HomeAssistantServiceCall(
+                    domain="light",
+                    service=service,
+                    payload=payload,
                 )
 
-            service = "turn_on" if normalized else "turn_off"
-            return HomeAssistantServiceCall(
-                "light",
-                service,
-                build_service_payload(self.entity_id),
+            raise ValueError(
+                f"Invalid state value for light: {value!r}. "
+                "Expected a boolean-like value such as 0/1, True/False, 'on'/'off'."
             )
 
         if point_name == "brightness":
@@ -363,89 +598,106 @@ class LightHandler(HomeAssistantDomainHandler):
             try:
                 brightness = int(normalized)
             except (TypeError, ValueError):
-                raise ValueError(f"Brightness must be numeric, got {value!r}")
+                raise ValueError(
+                    f"Brightness for light must be a number, got {value!r}"
+                )
 
             if not (0 <= brightness <= 255):
-                raise ValueError(f"Brightness must be between 0 and 255, got {brightness}")
+                raise ValueError(
+                    f"Brightness value should be between 0 and 255, got {brightness}"
+                )
 
+            payload = build_service_payload(self.entity_id, {"brightness": brightness})
+            # Home Assistant uses light.turn_on to set brightness
             return HomeAssistantServiceCall(
-                "light",
-                "turn_on",   # HA sets brightness via turning on
-                build_service_payload(self.entity_id, {"brightness": brightness}),
+                domain="light",
+                service="turn_on",
+                payload=payload,
             )
 
         raise UnsupportedPointError(point_name, self.entity_id)
 
 
-# =====================================================================
-# Thermostat Handler
-# =====================================================================
-
 class ThermostatHandler(HomeAssistantDomainHandler):
     """
-    climate.* handler supporting:
-        - state: 0/2/3/4 or 'off'/'heat'/'cool'/'auto'
-        - temperature: numeric, Fahrenheit→Celsius if units=C (legacy behavior)
+    Handler for `climate.*` thermostat entities.
+
+    Supported points:
+        - "state": integer mode code or mode string
+            0 -> "off"
+            2 -> "heat"
+            3 -> "cool"
+            4 -> "auto"
+        - "temperature": numeric setpoint.
+
+    NOTE:
+        For compatibility with the legacy implementation:
+        - If config["units"] == "C", we assume the input value is in Fahrenheit
+          and convert it to Celsius before sending to Home Assistant.
     """
 
-    MODE_CODE_TO_NAME = {0: "off", 2: "heat", 3: "cool", 4: "auto"}
+    MODE_CODE_TO_NAME = {
+        0: "off",
+        2: "heat",
+        3: "cool",
+        4: "auto",
+    }
 
     def build_service_call(self, point_name: str, value: Any) -> HomeAssistantServiceCall:
-        # -----------------------
-        # HVAC MODE
-        # -----------------------
         if point_name == "state":
-            mode_name = None
+            mode_name: Optional[str] = None
 
+            # Integer codes
             if isinstance(value, (int, float)):
                 mode_name = self.MODE_CODE_TO_NAME.get(int(value))
 
-            if isinstance(value, str) and mode_name is None:
+            # Direct mode strings
+            if mode_name is None and isinstance(value, str):
                 lowered = value.strip().lower()
                 if lowered in ("off", "heat", "cool", "auto"):
                     mode_name = lowered
 
             if mode_name is None:
                 raise ValueError(
-                    f"Invalid climate state value: {value!r}, "
-                    "expected 0/2/3/4 or 'off'/'heat'/'cool'/'auto'."
+                    f"Invalid climate state value: {value!r}. "
+                    "Expected 0/2/3/4 or 'off'/'heat'/'cool'/'auto'."
                 )
 
+            payload = build_service_payload(self.entity_id, {"hvac_mode": mode_name})
             return HomeAssistantServiceCall(
-                "climate",
-                "set_hvac_mode",
-                build_service_payload(self.entity_id, {"hvac_mode": mode_name}),
+                domain="climate",
+                service="set_hvac_mode",
+                payload=payload,
             )
 
-        # -----------------------
-        # TEMPERATURE SETPOINT
-        # -----------------------
         if point_name == "temperature":
             normalized = _normalize_value("temperature", value)
             try:
                 temperature = float(normalized)
             except (TypeError, ValueError):
-                raise ValueError(f"Temperature must be numeric, got {value!r}")
+                raise ValueError(
+                    f"Climate temperature must be numeric, got {value!r}"
+                )
 
             units = self.config.get("units")
             if units == "C":
+                # Keep behavior parity with legacy set_thermostat_temperature:
+                # treat the input as Fahrenheit and convert to Celsius.
                 converted = round((temperature - 32.0) * 5.0 / 9.0, 1)
             else:
                 converted = temperature
 
+            payload = build_service_payload(self.entity_id, {"temperature": converted})
             return HomeAssistantServiceCall(
-                "climate",
-                "set_temperature",
-                build_service_payload(self.entity_id, {"temperature": converted}),
+                domain="climate",
+                service="set_temperature",
+                payload=payload,
             )
 
         raise UnsupportedPointError(point_name, self.entity_id)
 
 
-# =====================================================================
-# Handler Registry
-# =====================================================================
-
+# Domain -> handler class registry. Extend this mapping when adding new domains.
 HANDLER_REGISTRY: Dict[str, Type[HomeAssistantDomainHandler]] = {
     "fan": FanDomainHandler,
     "switch": SwitchDomainHandler,
@@ -456,8 +708,9 @@ HANDLER_REGISTRY: Dict[str, Type[HomeAssistantDomainHandler]] = {
 
 
 # =====================================================================
-# Register Type
+# Register type
 # =====================================================================
+
 
 class HomeAssistantRegister(BaseRegister):
     def __init__(
@@ -473,17 +726,19 @@ class HomeAssistantRegister(BaseRegister):
         description='',
     ):
         super(HomeAssistantRegister, self).__init__(
-            "byte", read_only, pointName, units, description=""
+            "byte", read_only, pointName, units, description=''
         )
         self.reg_type = reg_type
         self.attributes = attributes
         self.entity_id = entity_id
-        self.entity_point = entity_point
         self.value = None
-    
+        self.entity_point = entity_point
+
+
 # =====================================================================
-# HTTP helpers
+# Legacy helper for simple POSTs (still used by some old methods)
 # =====================================================================
+
 
 def _send_service_call(
     config: Mapping[str, Any],
@@ -493,6 +748,21 @@ def _send_service_call(
 ) -> None:
     """
     Perform a Home Assistant service call via HTTP POST.
+
+    Args:
+        config:
+            Mapping containing at least:
+                - "base_url": e.g. "http://192.168.1.10:8123"
+                - "access_token": Home Assistant long-lived access token.
+        domain:
+            Home Assistant domain (e.g. "fan", "switch", "cover").
+        service:
+            Service name within the domain (e.g. "turn_on", "set_percentage").
+        payload:
+            JSON-serializable request body. Must include "entity_id".
+
+    Raises:
+        ServiceCallError: on network errors or non-2xx HTTP status.
     """
     base_url = config.get("base_url")
     access_token = config.get("access_token")
@@ -516,29 +786,29 @@ def _send_service_call(
         response = requests.post(url, headers=headers, json=dict(payload))
     except requests.RequestException as exc:
         msg = (
-            f"Error calling {domain}.{service} "
-            f"entity_id={payload.get('entity_id')!r}: {exc}"
+            f"Error when attempting service call {domain}.{service} "
+            f"for entity_id={payload.get('entity_id')!r}: {exc}"
         )
         _log.error(msg)
         raise ServiceCallError(domain, service, payload, msg)
 
-    if not 200 <= response.status_code < 300:
+    if not (200 <= response.status_code < 300):
         msg = (
-            f"Failed to call {domain}.{service} for {payload.get('entity_id')!r}. "
-            f"Status: {response.status_code}. Response: {response.text}"
+            f"Failed to call {domain}.{service} for entity_id={payload.get('entity_id')!r}. "
+            f"Status code: {response.status_code}. Response: {response.text}"
         )
         _log.error(msg)
         raise ServiceCallError(domain, service, payload, msg)
 
     _log.info(
-        "Home Assistant call OK: %s.%s(%r)", domain, service, payload.get("entity_id")
+        "Success calling %s.%s for entity_id=%r",
+        domain,
+        service,
+        payload.get("entity_id"),
     )
 
 
 def _post_method(url, headers, data, operation_description):
-    """
-    Thin wrapper used by legacy light/climate paths.
-    """
     err = None
     try:
         response = requests.post(url, headers=headers, json=data)
@@ -547,19 +817,22 @@ def _post_method(url, headers, data, operation_description):
         else:
             err = (
                 f"Failed to {operation_description}. "
-                f"Status {response.status_code}. Response: {response.text}"
+                f"Status code: {response.status_code}. Response: {response.text}"
             )
     except requests.RequestException as e:
-        err = f"Error {operation_description}: {e}"
+        err = f"Error when attempting - {operation_description} : {e}"
 
     if err:
         _log.error(err)
+        # For legacy paths we still raise a generic Exception;
+        # new code should prefer ServiceCallError.
         raise Exception(err)
 
 
 # =====================================================================
-# Main Volttron Interface
+# Main Volttron interface
 # =====================================================================
+
 
 class Interface(BasicRevert, BaseInterface):
     def __init__(self, **kwargs):
@@ -570,7 +843,10 @@ class Interface(BasicRevert, BaseInterface):
         self.port: Optional[int] = None
         self.units = None
 
+        # Base URL for Home Assistant, e.g. "http://192.168.1.10:8123"
         self._base_url: Optional[str] = None
+
+        # Cache of entity_id -> domain handler instance
         self._entity_handlers: Dict[str, HomeAssistantDomainHandler] = {}
 
     # ------------------------------------------------------------------
@@ -578,32 +854,45 @@ class Interface(BasicRevert, BaseInterface):
     # ------------------------------------------------------------------
 
     def configure(self, config_dict, registry_config_str):
-        self.ip_address = config_dict.get("ip_address")
-        self.access_token = config_dict.get("access_token")
-        self.port = config_dict.get("port")
+        self.ip_address = config_dict.get("ip_address", None)
+        self.access_token = config_dict.get("access_token", None)
+        self.port = config_dict.get("port", None)
 
-        if not self.ip_address:
+        # Check for None values
+        if self.ip_address is None:
+            _log.error("IP address is not set.")
             raise ValueError("IP address is required.")
-        if not self.access_token:
+        if self.access_token is None:
+            _log.error("Access token is not set.")
             raise ValueError("Access token is required.")
-        if not self.port:
+        if self.port is None:
+            _log.error("Port is not set.")
             raise ValueError("Port is required.")
 
         self._base_url = f"http://{self.ip_address}:{self.port}"
 
-        # registry_config_str already parsed into list of dicts
+        # registry_config_str is already parsed into a list of register dicts
         self.parse_config(registry_config_str)
 
     # ------------------------------------------------------------------
-    # Generic handler-based HTTP caller
+    # Generic helper for calling Home Assistant services (new path)
     # ------------------------------------------------------------------
 
-    def _call_service(self, service_call: HomeAssistantServiceCall, desc: str) -> None:
-        _log.info("Calling HA service: %s", desc)
+    def _call_service(
+        self, service_call: HomeAssistantServiceCall, operation_description: str
+    ) -> None:
+        """
+        Perform the HTTP POST to Home Assistant for a given service call.
+
+        All HTTP / network details are centralized in _send_service_call(...)
+        so that all write paths share the same error handling and logging
+        behavior. Domain handlers remain pure and only return data objects.
+        """
         config = {
             "base_url": self._base_url,
             "access_token": self.access_token,
         }
+        _log.info("Calling Home Assistant service: %s", operation_description)
         _send_service_call(
             config,
             service_call.domain,
@@ -611,42 +900,43 @@ class Interface(BasicRevert, BaseInterface):
             service_call.payload,
         )
 
-    # ------------------------------------------------------------------
-    # Handler lookup or creation
-    # ------------------------------------------------------------------
-
     def _get_handler_for_register(
-        self,
-        register: HomeAssistantRegister,
+        self, register: HomeAssistantRegister
     ) -> HomeAssistantDomainHandler:
+        """
+        Return a domain handler instance for the given register's entity_id.
+
+        - If a handler instance already exists, reuse it.
+        - If the entity's domain has a registered handler class, instantiate it.
+        - Otherwise, raise UnsupportedDomainError.
+        """
         entity_id = register.entity_id
+        handler = self._entity_handlers.get(entity_id)
+        if handler is not None:
+            return handler
 
-        # cached?
-        if entity_id in self._entity_handlers:
-            return self._entity_handlers[entity_id]
-
-        # determine domain
         try:
             domain = get_domain_from_entity_id(entity_id)
         except ValueError:
+            # Make it clear the entity_id is malformed.
             raise UnsupportedDomainError(entity_id, "Invalid entity_id format")
 
         handler_cls = HANDLER_REGISTRY.get(domain)
         if handler_cls is None:
+            # No handler registered for this domain
             raise UnsupportedDomainError(entity_id)
 
-        handler_cfg = {
+        handler_config = {
             "entity_point": register.entity_point,
             "attributes": register.attributes,
             "units": getattr(register, "units", None),
         }
-
-        handler = handler_cls(entity_id, handler_cfg)
+        handler = handler_cls(entity_id, handler_config)
         self._entity_handlers[entity_id] = handler
         return handler
 
     # ------------------------------------------------------------------
-    # READ
+    # Point read/write
     # ------------------------------------------------------------------
 
     def get_point(self, point_name):
@@ -654,146 +944,183 @@ class Interface(BasicRevert, BaseInterface):
         entity_data = self.get_entity_data(register.entity_id)
 
         if register.point_name == "state":
-            return entity_data.get("state")
-
-        return entity_data.get("attributes", {}).get(register.point_name, 0)
-
-    # ------------------------------------------------------------------
-    # WRITE
-    # ------------------------------------------------------------------
+            result = entity_data.get("state", None)
+            return result
+        else:
+            value = entity_data.get("attributes", {}).get(f"{register.point_name}", 0)
+            return value
 
     def _set_point(self, point_name, value):
+        """
+        Write a point.
+
+        Flow:
+            - Lookup register by Volttron point name.
+            - Enforce read_only flag.
+            - For handler domains (fan/switch/cover/light/climate):
+                * Keep raw user value, let handler + _normalize_value decide.
+            - For legacy domains (light/input_boolean/climate without handler):
+                * Cast to the register's declared type and use legacy HTTP helpers.
+            - Cache the written value in the register.
+        """
         register: HomeAssistantRegister = self.get_register_by_name(point_name)
 
         if register.read_only:
-            raise IOError(f"Trying to write read-only point: {point_name}")
+            raise IOError("Trying to write to a point configured read only: " + point_name)
 
         entity_id = register.entity_id
-        entity_point = register.entity_point  # actual HA field
+        entity_point = register.entity_point
 
-        # handler-based domains first
+        # -----------------------------
+        # Handler-based domains first
+        # -----------------------------
         try:
             domain = get_domain_from_entity_id(entity_id)
         except ValueError:
             domain = ""
 
         if domain in HANDLER_REGISTRY:
+            # For handler domains, keep the original user input and let the handler
+            # + _normalize_value do the work.
             register.value = value
+
             handler = self._get_handler_for_register(register)
-
-            # IMPORTANT: pass the **entity_point** from registry
+            # IMPORTANT:
+            #   We pass the registry "Entity Point" (e.g. "state"/"percentage"/"position")
+            #   into the handler, not the Volttron point name.
             service_call = handler.build_service_call(entity_point, register.value)
-
-            desc = f"{service_call.domain}.{service_call.service} for {entity_id}"
-            self._call_service(service_call, desc)
+            op_desc = f"{service_call.domain}.{service_call.service} for {entity_id}"
+            self._call_service(service_call, op_desc)
             return register.value
 
-        # ------------------------------------------------------------------
-        # Legacy path for light.*, input_boolean.*, climate.* without handler
-        # ------------------------------------------------------------------
-
+        # -----------------------------
+        # Legacy path: original behavior
+        # -----------------------------
         register.value = register.reg_type(value)
 
-        # LIGHTS
+        # Changing light values in Home Assistant based off of register value.
         if entity_id.startswith("light."):
             if entity_point == "state":
-                if register.value == 1:
-                    self.turn_on_lights(entity_id)
-                elif register.value == 0:
-                    self.turn_off_lights(entity_id)
+                if isinstance(register.value, int) and register.value in [0, 1]:
+                    if register.value == 1:
+                        self.turn_on_lights(entity_id)
+                    elif register.value == 0:
+                        self.turn_off_lights(entity_id)
                 else:
-                    raise ValueError(f"State for {entity_id} must be 0 or 1")
+                    error_msg = (
+                        f"State value for {entity_id} should be an integer value of 1 or 0"
+                    )
+                    _log.info(error_msg)
+                    raise ValueError(error_msg)
 
             elif entity_point == "brightness":
+                # Make sure it's int and within range
                 if isinstance(register.value, int) and 0 <= register.value <= 255:
                     self.change_brightness(entity_id, register.value)
                 else:
-                    raise ValueError("Brightness must be int 0–255")
-
+                    error_msg = (
+                        "Brightness value should be an integer between 0 and 255"
+                    )
+                    _log.error(error_msg)
+                    raise ValueError(error_msg)
             else:
-                raise ValueError(
-                    f"Unsupported point {entity_point} for {entity_id}. "
-                    "Lights support state/brightness."
-                )
+                error_msg = f"Unexpected point_name {point_name} for register {entity_id}"
+                _log.error(error_msg)
+                raise ValueError(error_msg)
 
-        # INPUT BOOLEAN
         elif entity_id.startswith("input_boolean."):
             if entity_point == "state":
-                if register.value in ["on", "off"]:
-                    self.set_input_boolean(entity_id, register.value)
+                if isinstance(register.value, int) and register.value in [0, 1]:
+                    if register.value == 1:
+                        self.set_input_boolean(entity_id, "on")
+                    elif register.value == 0:
+                        self.set_input_boolean(entity_id, "off")
                 else:
-                    raise ValueError("input_boolean state must be 'on' or 'off'")
+                    error_msg = (
+                        f"State value for {entity_id} should be an integer value of 1 or 0"
+                    )
+                    _log.info(error_msg)
+                    raise ValueError(error_msg)
             else:
-                raise ValueError(
-                    f"Unsupported point {entity_point} for {entity_id}. "
-                    "input_boolean only supports state."
-                )
+                _log.info("Currently, input_booleans only support state")
 
-        # CLIMATE
+        # Changing thermostat values.
         elif entity_id.startswith("climate."):
             if entity_point == "state":
-                mode_map = {0: "off", 2: "heat", 3: "cool", 4: "auto"}
-                mode = mode_map.get(register.value)
-                if not mode:
-                    raise ValueError("Climate state must be 0/2/3/4")
-                self.change_thermostat_mode(entity_id, mode)
-
-            elif entity_point == "temperature":
-                if isinstance(register.value, (int, float)):
-                    self.set_thermostat_temperature(entity_id, register.value)
+                if isinstance(register.value, int) and register.value in [0, 2, 3, 4]:
+                    if register.value == 0:
+                        self.change_thermostat_mode(entity_id=entity_id, mode="off")
+                    elif register.value == 2:
+                        self.change_thermostat_mode(entity_id=entity_id, mode="heat")
+                    elif register.value == 3:
+                        self.change_thermostat_mode(entity_id=entity_id, mode="cool")
+                    elif register.value == 4:
+                        self.change_thermostat_mode(entity_id=entity_id, mode="auto")
                 else:
-                    raise ValueError("Temperature must be numeric")
-
-            else:
-                raise ValueError(
-                    f"Unsupported climate point {entity_point} for {entity_id}"
+                    error_msg = (
+                        "Climate state should be an integer value of 0, 2, 3, or 4"
+                    )
+                    _log.error(error_msg)
+                    raise ValueError(error_msg)
+            elif entity_point == "temperature":
+                self.set_thermostat_temperature(
+                    entity_id=entity_id, temperature=register.value
                 )
-
+            else:
+                error_msg = (
+                    "Currently set_point is supported only for thermostat state and "
+                    f"temperature {entity_id}"
+                )
+                _log.error(error_msg)
+                raise ValueError(error_msg)
         else:
-            raise ValueError(
-                f"Unsupported entity_id {entity_id}. Only lights/thermostats "
-                "supported in legacy mode."
+            error_msg = (
+                f"Unsupported entity_id: {entity_id}. "
+                f"Currently set_point is supported only for thermostats and lights"
             )
+            _log.error(error_msg)
+            raise ValueError(error_msg)
 
         return register.value
 
     # ------------------------------------------------------------------
-    # Entity data helpers (READ path)
+    # Entity data helpers (read path, mostly legacy but still useful)
     # ------------------------------------------------------------------
 
     def get_entity_data(self, entity_id):
         """
         Fetch current state and attributes for a specific entity from Home Assistant.
         """
-        if not self._base_url:
-            raise RuntimeError("Home Assistant base URL is not configured.")
-
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
-        url = f"{self._base_url}/api/states/{entity_id}"
+        if not self._base_url:
+            raise RuntimeError("Home Assistant base URL is not configured.")
 
+        url = f"{self._base_url}/api/states/{entity_id}"
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            return response.json()
+            return response.json()  # return the json attributes from entity
         else:
-            msg = (
-                f"Request failed with status {response.status_code} for {entity_id}. "
-                f"Response: {response.text}"
+            error_msg = (
+                f"Request failed with status code {response.status_code}, "
+                f"Entity ID: {entity_id}, response: {response.text}"
             )
-            _log.error(msg)
-            raise Exception(msg)
+            _log.error(error_msg)
+            raise Exception(error_msg)
 
     def _scrape_all(self):
         """
         Bulk read of all registers.
 
         NOTE:
-            Still uses the original climate/light/input_boolean logic.
-            Other entities just expose raw state/attributes.
+            The logic here is mostly the original implementation, still
+            focusing on climate / light / input_boolean. In the future,
+            if more detailed fan/switch/cover mappings are needed, we can
+            consider introducing per-domain handlers for the read path as well.
         """
-        result: Dict[str, Any] = {}
+        result = {}
         read_registers = self.get_registers_by_type("byte", True)
         write_registers = self.get_registers_by_type("byte", False)
 
@@ -801,69 +1128,75 @@ class Interface(BasicRevert, BaseInterface):
             entity_id = register.entity_id
             entity_point = register.entity_point
             try:
-                entity_data = self.get_entity_data(entity_id)
+                entity_data = self.get_entity_data(entity_id)  # Using Entity ID to get data
 
-                # Thermostats
+                # handling thermostats
                 if entity_id.startswith("climate."):
                     if entity_point == "state":
-                        state = entity_data.get("state")
+                        state = entity_data.get("state", None)
+                        # Giving thermostat states an equivalent number.
                         if state == "off":
                             register.value = 0
+                            result[register.point_name] = 0
                         elif state == "heat":
                             register.value = 2
+                            result[register.point_name] = 2
                         elif state == "cool":
                             register.value = 3
+                            result[register.point_name] = 3
                         elif state == "auto":
                             register.value = 4
+                            result[register.point_name] = 4
                         else:
-                            _log.error(
-                                "Unsupported climate state %r from %s", state, entity_id
+                            error_msg = (
+                                f"State {state} from {entity_id} is not yet supported"
                             )
-                            continue
-                        result[register.point_name] = register.value
+                            _log.error(error_msg)
+                            ValueError(error_msg)
                     else:
-                        attr = entity_data.get("attributes", {}).get(entity_point, 0)
-                        register.value = attr
-                        result[register.point_name] = attr
+                        # Assign attribute
+                        attribute = entity_data.get("attributes", {}).get(
+                            f"{entity_point}", 0
+                        )
+                        register.value = attribute
+                        result[register.point_name] = attribute
 
-                # Lights + input_boolean
+                # handling light & input_boolean states
                 elif entity_id.startswith("light.") or entity_id.startswith(
                     "input_boolean."
                 ):
                     if entity_point == "state":
-                        state = entity_data.get("state")
+                        state = entity_data.get("state", None)
+                        # Converting light/input_boolean states to numbers.
                         if state == "on":
                             register.value = 1
+                            result[register.point_name] = 1
                         elif state == "off":
                             register.value = 0
-                        else:
-                            _log.error(
-                                "Unsupported on/off state %r from %s", state, entity_id
-                            )
-                            continue
-                        result[register.point_name] = register.value
+                            result[register.point_name] = 0
                     else:
-                        attr = entity_data.get("attributes", {}).get(entity_point, 0)
-                        register.value = attr
-                        result[register.point_name] = attr
+                        attribute = entity_data.get("attributes", {}).get(
+                            f"{entity_point}", 0
+                        )
+                        register.value = attribute
+                        result[register.point_name] = attribute
 
-                # Generic entities
                 else:
+                    # handling all devices that are not thermostats or light/input_boolean
                     if entity_point == "state":
-                        state = entity_data.get("state")
+                        state = entity_data.get("state", None)
                         register.value = state
                         result[register.point_name] = state
                     else:
-                        attr = entity_data.get("attributes", {}).get(entity_point, 0)
-                        register.value = attr
-                        result[register.point_name] = attr
+                        attribute = entity_data.get("attributes", {}).get(
+                            f"{entity_point}", 0
+                        )
+                        register.value = attribute
+                        result[register.point_name] = attribute
 
-            except Exception as exc:
+            except Exception as e:
                 _log.error(
-                    "Error scraping entity_id %s for point %s: %s",
-                    entity_id,
-                    register.point_name,
-                    exc,
+                    f"An unexpected error occurred for entity_id: {entity_id}: {e}"
                 )
 
         return result
@@ -876,36 +1209,38 @@ class Interface(BasicRevert, BaseInterface):
         """
         Parse the registry configuration into HomeAssistantRegister instances.
 
-        After creating each register, we also attempt to attach a domain
-        handler (fan/switch/cover/light/climate) based on its entity_id.
+        NOTE:
+            We keep the original parsing logic and, after each register
+            is created, try to register a domain handler if the entity_id
+            belongs to a supported domain (fan/switch/cover/light/climate).
         """
-        if not config_dict:
+        if config_dict is None:
             return
 
-        for reg_def in config_dict:
-            if not reg_def.get("Entity ID"):
+        for regDef in config_dict:
+            if not regDef.get("Entity ID"):
                 continue
 
-            read_only = str(reg_def.get("Writable", "")).lower() != "true"
-            entity_id = reg_def["Entity ID"]
-            entity_point = reg_def["Entity Point"]
-            self.point_name = reg_def["Volttron Point Name"]
-            self.units = reg_def["Units"]
-            description = reg_def.get("Notes", "")
+            read_only = str(regDef.get("Writable", "")).lower() != "true"
+            entity_id = regDef["Entity ID"]
+            entity_point = regDef["Entity Point"]
+            self.point_name = regDef["Volttron Point Name"]
+            self.units = regDef["Units"]
+            description = regDef.get("Notes", "")
             default_value = "Starting Value"
-
-            type_name = reg_def.get("Type", "string")
+            type_name = regDef.get("Type", "string")
             reg_type = type_mapping.get(type_name, str)
-            attributes = reg_def.get("Attributes", {}) or {}
+            attributes = regDef.get("Attributes", {})
+            register_type = HomeAssistantRegister
 
-            register = HomeAssistantRegister(
-                read_only=read_only,
-                pointName=self.point_name,
-                units=self.units,
-                reg_type=reg_type,
-                attributes=attributes,
-                entity_id=entity_id,
-                entity_point=entity_point,
+            register = register_type(
+                read_only,
+                self.point_name,
+                self.units,
+                reg_type,
+                attributes,
+                entity_id,
+                entity_point,
                 default_value=default_value,
                 description=description,
             )
@@ -915,7 +1250,7 @@ class Interface(BasicRevert, BaseInterface):
 
             self.insert_register(register)
 
-            # try to pre-create a domain handler if supported
+            # Try to register a domain handler (fan/switch/cover/light/climate)
             try:
                 domain = get_domain_from_entity_id(entity_id)
             except ValueError:
@@ -925,16 +1260,18 @@ class Interface(BasicRevert, BaseInterface):
                 continue
 
             handler_cls = HANDLER_REGISTRY.get(domain)
-            if handler_cls and entity_id not in self._entity_handlers:
-                handler_cfg = {
+            if handler_cls is not None and entity_id not in self._entity_handlers:
+                handler_config = {
                     "entity_point": entity_point,
                     "attributes": attributes,
                     "units": self.units,
                 }
-                self._entity_handlers[entity_id] = handler_cls(entity_id, handler_cfg)
+                self._entity_handlers[entity_id] = handler_cls(
+                    entity_id, handler_config
+                )
 
     # ------------------------------------------------------------------
-    # Legacy convenience helpers (lights / climate / input_boolean)
+    # Legacy specific helpers (still usable for existing configs)
     # ------------------------------------------------------------------
 
     def turn_off_lights(self, entity_id):
@@ -943,7 +1280,9 @@ class Interface(BasicRevert, BaseInterface):
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
-        payload = {"entity_id": entity_id}
+        payload = {
+            "entity_id": entity_id,
+        }
         _post_method(url, headers, payload, f"turn off {entity_id}")
 
     def turn_on_lights(self, entity_id):
@@ -952,48 +1291,53 @@ class Interface(BasicRevert, BaseInterface):
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
-        payload = {"entity_id": entity_id}
+
+        payload = {"entity_id": f"{entity_id}"}
         _post_method(url, headers, payload, f"turn on {entity_id}")
 
     def change_thermostat_mode(self, entity_id, mode):
+        # Check if enttiy_id startswith climate.
         if not entity_id.startswith("climate."):
-            _log.error("%s is not a thermostat entity_id", entity_id)
+            _log.error(f"{entity_id} is not a valid thermostat entity ID.")
             return
 
         url = f"{self._base_url}/api/services/climate/set_hvac_mode"
         headers = {
             "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json",
+            "content-type": "application/json",
         }
         data = {
             "entity_id": entity_id,
             "hvac_mode": mode,
         }
-        _post_method(url, headers, data, f"set hvac_mode of {entity_id} to {mode}")
+        _post_method(url, headers, data, f"change mode of {entity_id} to {mode}")
 
     def set_thermostat_temperature(self, entity_id, temperature):
+        # Check if the provided entity_id starts with "climate."
         if not entity_id.startswith("climate."):
-            _log.error("%s is not a thermostat entity_id", entity_id)
+            _log.error(f"{entity_id} is not a valid thermostat entity ID.")
             return
 
         url = f"{self._base_url}/api/services/climate/set_temperature"
         headers = {
             "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json",
+            "content-type": "application/json",
         }
 
         if self.units == "C":
-            converted = round((temperature - 32) * 5.0 / 9.0, 1)
-            _log.info("Converted temperature %s°F -> %s°C", temperature, converted)
-            data = {"entity_id": entity_id, "temperature": converted}
+            converted_temp = round((temperature - 32) * 5 / 9, 1)
+            _log.info(f"Converted temperature {converted_temp}")
+            data = {
+                "entity_id": entity_id,
+                "temperature": converted_temp,
+            }
         else:
-            data = {"entity_id": entity_id, "temperature": temperature}
-
+            data = {
+                "entity_id": entity_id,
+                "temperature": temperature,
+            }
         _post_method(
-            url,
-            headers,
-            data,
-            f"set temperature of {entity_id} to {temperature}",
+            url, headers, data, f"set temperature of {entity_id} to {temperature}"
         )
 
     def change_brightness(self, entity_id, value):
@@ -1002,15 +1346,14 @@ class Interface(BasicRevert, BaseInterface):
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
+        # ranges from 0 - 255
         payload = {
-            "entity_id": entity_id,
+            "entity_id": f"{entity_id}",
             "brightness": value,
         }
+
         _post_method(
-            url,
-            headers,
-            payload,
-            f"set brightness of {entity_id} to {value}",
+            url, headers, payload, f"set brightness of {entity_id} to {value}"
         )
 
     def set_input_boolean(self, entity_id, state):
@@ -1020,12 +1363,12 @@ class Interface(BasicRevert, BaseInterface):
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
+
         payload = {"entity_id": entity_id}
 
         response = requests.post(url, headers=headers, json=payload)
+
         if response.status_code == 200:
-            _log.info("Successfully set %s to %s", entity_id, state)
+            _log.info(f"Successfully set {entity_id} to {state}")
         else:
-            _log.error(
-                "Failed to set %s to %s: %s", entity_id, state, response.text
-            )
+            _log.error(f"Failed to set {entity_id} to {state}: {response.text}")
